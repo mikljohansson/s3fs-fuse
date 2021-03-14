@@ -45,6 +45,7 @@
 #include "string_util.h"
 #include "s3fs_auth.h"
 #include "s3fs_help.h"
+#include "s3fs_versioning.h"
 #include "mpu_util.h"
 
 //-------------------------------------------------------------------
@@ -104,6 +105,8 @@ static const std::string keyval_fields_type    = "\t";       // special key for 
 static const std::string aws_accesskeyid       = "AWSAccessKeyId";
 static const std::string aws_secretkey         = "AWSSecretKey";
 
+static bool use_versioning                     = true;
+
 //-------------------------------------------------------------------
 // Global functions : prototype
 //-------------------------------------------------------------------
@@ -122,8 +125,9 @@ static int check_parent_object_access(const char* path, int mask);
 static int get_local_fent(AutoFdEntity& autoent, FdEntity **entity, const char* path, bool is_load = false);
 static bool multi_head_callback(S3fsCurl* s3fscurl);
 static S3fsCurl* multi_head_retry_callback(S3fsCurl* s3fscurl);
-static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf, fuse_fill_dir_t filler);
+static int readdir_multi_head(const char* path, const char* bucketpath, const S3ObjList& head, void* buf, fuse_fill_dir_t filler);
 static int list_bucket(const char* path, S3ObjList& head, const char* delimiter, bool check_content_only = false);
+static int list_object_versions(const char* path, S3ObjList& head, const char* delimiter);
 static int directory_empty(const char* path);
 static int rename_large_object(const char* from, const char* to);
 static int create_file_object(const char* path, mode_t mode, uid_t uid, gid_t gid);
@@ -357,6 +361,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     headers_t    tmpHead;
     headers_t*   pheader = pmeta ? pmeta : &tmpHead;
     std::string  strpath;
+    std::string  bucketpath;
     S3fsCurl     s3fscurl;
     bool         forcedir = false;
     std::string::size_type Pos;
@@ -368,7 +373,8 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     }
 
     memset(pstat, 0, sizeof(struct stat));
-    if(0 == strcmp(path, "/") || 0 == strcmp(path, ".")){
+    if(0 == strcmp(path, "/") || 0 == strcmp(path, ".") ||
+      (use_versioning && (S3FS_DIRNAME == path || VERSIONS_DIRNAME == path))){
         pstat->st_nlink = 1; // see fuse faq
         pstat->st_mode  = mp_mode;
         pstat->st_uid   = is_s3fs_uid ? s3fs_uid : mp_uid;
@@ -481,6 +487,11 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     if(std::string::npos != (Pos = strpath.find("_$folder$", 0))){
         strpath.erase(Pos);
         strpath += "/";
+    }
+
+    // Keys becomes directories that themselves contains versions under the .s3fs/versions/ directory
+    if (is_versioning_context(path)) {
+        forcedir = true;
     }
 
     // Set into cache
@@ -2513,7 +2524,7 @@ static S3fsCurl* multi_head_retry_callback(S3fsCurl* s3fscurl)
     return newcurl;
 }
 
-static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf, fuse_fill_dir_t filler)
+static int readdir_multi_head(const char* path, const char* bucketpath, const S3ObjList& head, void* buf, fuse_fill_dir_t filler)
 {
     S3fsMultiCurl curlmulti(S3fsCurl::GetMaxMultiRequest());
     s3obj_list_t  headlist;
@@ -2534,8 +2545,9 @@ static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf
     fillerlist.clear();
     // Make single head request(with max).
     for(iter = headlist.begin(); headlist.end() != iter; iter = headlist.erase(iter)){
-        std::string disppath = path + (*iter);
-        std::string etag     = head.GetETag((*iter).c_str());
+        std::string disppath       = path + (*iter);
+        std::string dispbucketpath = bucketpath + (*iter);
+        std::string etag           = head.GetETag((*iter).c_str());
 
         std::string fillpath = disppath;
         if('/' == disppath[disppath.length() - 1]){
@@ -2550,14 +2562,14 @@ static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf
         // First check for directory, start checking "not SSE-C".
         // If checking failed, retry to check with "SSE-C" by retry callback func when SSE-C mode.
         S3fsCurl* s3fscurl = new S3fsCurl();
-        if(!s3fscurl->PreHeadRequest(disppath, (*iter), disppath)){  // target path = cache key path.(ex "dir/")
-            S3FS_PRN_WARN("Could not make curl object for head request(%s).", disppath.c_str());
+        if(!s3fscurl->PreHeadRequest(dispbucketpath, (*iter), dispbucketpath)){  // target path = cache key path.(ex "dir/")
+            S3FS_PRN_WARN("Could not make curl object for head request(%s).", dispbucketpath.c_str());
             delete s3fscurl;
             continue;
         }
 
         if(!curlmulti.SetS3fsCurlObject(s3fscurl)){
-            S3FS_PRN_WARN("Could not make curl object into multi curl(%s).", disppath.c_str());
+            S3FS_PRN_WARN("Could not make curl object into multi curl(%s).", dispbucketpath.c_str());
             delete s3fscurl;
             continue;
         }
@@ -2606,29 +2618,61 @@ static int s3fs_readdir(const char* _path, void* buf, fuse_fill_dir_t filler, of
 
     S3FS_PRN_INFO("[path=%s]", path);
 
-    if(0 != (result = check_object_access(path, R_OK, NULL))){
+    // force to add "." and ".." name.
+    filler(buf, ".", 0, 0);
+    filler(buf, "..", 0, 0);
+
+    // Add versioning directory entrypoints to the mount root directory
+    if(use_versioning){
+        if (strcmp(path, "/") == 0) {
+            filler(buf, S3FS_DIRNAME.c_str() + 1 /*remove leading slash*/, 0, 0);
+        }
+        else if (S3FS_DIRNAME == path) {
+            filler(buf, VERSIONS_DIRNAME.c_str() + S3FS_DIRNAME.length() + 1 /*remove prefix and slash*/, 0, 0);
+            return 0;
+        }
+    }
+    
+    // Remove the version prefix when listing bucket contents
+    std::string strpath = path;
+    std::string bucketpath = remove_versions_prefix(path);
+
+    if(0 != (result = check_object_access(bucketpath.c_str(), R_OK, NULL))){
         return result;
     }
 
     // get a list of all the objects
-    if((result = list_bucket(path, head, "/")) != 0){
+    if((result = list_bucket(bucketpath.c_str(), head, "/")) != 0){
         S3FS_PRN_ERR("list_bucket returns error(%d).", result);
         return result;
     }
 
-    // force to add "." and ".." name.
-    filler(buf, ".", 0, 0);
-    filler(buf, "..", 0, 0);
+    // Check if this is an object we're trying to list versions for
+    if(use_versioning && strpath != bucketpath && head.IsEmpty()) {
+        struct stat pathstat, bucketstat;
+        if (get_object_attribute(strpath.c_str(), &pathstat, NULL) == 0 &&
+            get_object_attribute(bucketpath.c_str(), &bucketstat, NULL) == 0 &&
+            S_ISDIR(pathstat.st_mode) && !S_ISDIR(bucketstat.st_mode)) {
+            // Get a list of all the versions of this object
+            if((result = list_object_versions(bucketpath.c_str(), head, "/")) != 0){
+                S3FS_PRN_ERR("list_object_versions returns error(%d).", result);
+                return result;
+            }
+        }
+    }
+
     if(head.IsEmpty()){
         return 0;
     }
 
     // Send multi head request for stats caching.
-    std::string strpath = path;
-    if(strcmp(path, "/") != 0){
+    if(strpath != "/"){
         strpath += "/";
     }
-    if(0 != (result = readdir_multi_head(strpath.c_str(), head, buf, filler))){
+    if(bucketpath != "/"){
+        bucketpath += "/";
+    }
+    if(0 != (result = readdir_multi_head(strpath.c_str(), bucketpath.c_str(), head, buf, filler))){
         S3FS_PRN_ERR("readdir_multi_head returns error(%d).", result);
     }
     S3FS_MALLOCTRIM(0);
@@ -2743,6 +2787,104 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
         if(check_content_only){
             break;
         }
+    }
+    S3FS_MALLOCTRIM(0);
+
+    return 0;
+}
+
+static int list_object_versions(const char* path, S3ObjList& head, const char* delimiter)
+{
+    std::string s3_realpath;
+    std::string query_delimiter;
+    std::string query_prefix;
+    std::string query_maxkey;
+    std::string next_marker;
+    bool truncated = true;
+    S3fsCurl  s3fscurl;
+    xmlDocPtr doc;
+
+    S3FS_PRN_INFO1("[path=%s]", path);
+
+    if(delimiter && 0 < strlen(delimiter)){
+        query_delimiter += "delimiter=";
+        query_delimiter += delimiter;
+        query_delimiter += "&";
+    }
+
+    query_maxkey += "max-keys=" + str(max_keys_list_object);
+    query_maxkey += "&";
+
+    query_prefix += "prefix=";
+    s3_realpath = get_realpath(path);
+    query_prefix += urlEncode(s3_realpath.substr(1));
+    query_prefix += "&";
+
+    while(truncated){
+        // append parameters to query in alphabetical order (otherwise request signing process won't work)
+        std::string each_query = "";
+        each_query += query_delimiter;
+        each_query += query_maxkey;
+        each_query += query_prefix;
+
+        if(!next_marker.empty()){
+            each_query += "version-id-marker=" + urlEncode(next_marker);
+            each_query += "&";
+            next_marker = "";
+        }
+
+        each_query += "versions=";
+
+        // request
+        int result; 
+        if(0 != (result = s3fscurl.ListObjectVersionsRequest(path, each_query.c_str()))){
+            S3FS_PRN_ERR("ListObjectVersionsRequest returns with error.");
+            return result;
+        }
+        /*
+        BodyData* body = s3fscurl.GetBodyData();
+
+        // xmlDocPtr
+        if(NULL == (doc = xmlReadMemory(body->str(), static_cast<int>(body->size()), "", NULL, 0))){
+            S3FS_PRN_ERR("xmlReadMemory returns with error.");
+            return -EIO;
+        }
+        if(0 != append_objects_from_xml(path, doc, head)){
+            S3FS_PRN_ERR("append_objects_from_xml returns with error.");
+            xmlFreeDoc(doc);
+            return -EIO;
+        }
+        if(true == (truncated = is_truncated(doc))){
+            xmlChar* tmpch;
+            if(NULL != (tmpch = get_next_contination_token(doc))){
+                next_continuation_token = (char*)tmpch;
+                xmlFree(tmpch);
+            }else if(NULL != (tmpch = get_next_marker(doc))){
+                next_marker = (char*)tmpch;
+                xmlFree(tmpch);
+            }
+
+            if(next_continuation_token.empty() && next_marker.empty()){
+                // If did not specify "delimiter", s3 did not return "NextMarker".
+                // On this case, can use last name for next marker.
+                //
+                std::string lastname;
+                if(!head.GetLastName(lastname)){
+                    S3FS_PRN_WARN("Could not find next marker, thus break loop.");
+                    truncated = false;
+                }else{
+                    next_marker = s3_realpath.substr(1);
+                    if(0 == s3_realpath.length() || '/' != s3_realpath[s3_realpath.length() - 1]){
+                        next_marker += "/";
+                    }
+                    next_marker += lastname;
+                }
+            }
+        }
+        S3FS_XMLFREEDOC(doc);*/
+
+        // reset(initialize) curl object
+        s3fscurl.DestroyCurlHandle();
     }
     S3FS_MALLOCTRIM(0);
 

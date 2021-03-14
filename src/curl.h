@@ -97,6 +97,7 @@ class S3fsCurl
             REQTYPE_GET,
             REQTYPE_CHKBUCKET,
             REQTYPE_LISTBUCKET,
+            REQTYPE_LISTOBJECTVERSIONS,
             REQTYPE_PREMULTIPOST,
             REQTYPE_COMPLETEMULTIPOST,
             REQTYPE_UPLOADMULTIPOST,
@@ -386,6 +387,7 @@ class S3fsCurl
         int GetObjectRequest(const char* tpath, int fd, off_t start = -1, off_t size = -1);
         int CheckBucket();
         int ListBucketRequest(const char* tpath, const char* query);
+        int ListObjectVersionsRequest(const char* tpath, const char* query);
         int PreMultipartPostRequest(const char* tpath, headers_t& meta, std::string& upload_id, bool is_copy);
         int CompleteMultipartPostRequest(const char* tpath, const std::string& upload_id, etaglist_t& parts);
         int UploadMultipartPostRequest(const char* tpath, int part_num, const std::string& upload_id);

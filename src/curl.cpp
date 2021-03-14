@@ -34,6 +34,7 @@
 #include "s3fs_auth.h"
 #include "autolock.h"
 #include "s3fs_util.h"
+#include "s3fs_versioning.h"
 #include "string_util.h"
 #include "addhead.h"
 
@@ -2160,6 +2161,7 @@ bool S3fsCurl::RemakeHandle()
             break;
 
         case REQTYPE_LISTBUCKET:
+        case REQTYPE_LISTOBJECTVERSIONS:
             curl_easy_setopt(hCurl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(hCurl, CURLOPT_WRITEDATA, (void*)&bodydata);
             curl_easy_setopt(hCurl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
@@ -2607,7 +2609,7 @@ std::string S3fsCurl::CalcSignature(const std::string& method, const std::string
 
 void S3fsCurl::insertV4Headers()
 {
-    std::string server_path = type == REQTYPE_LISTBUCKET ? "/" : path;
+    std::string server_path = (type == REQTYPE_LISTBUCKET || type == REQTYPE_LISTOBJECTVERSIONS) ? "/" : path;
     std::string payload_hash;
     switch (type) {
         case REQTYPE_PUT:
@@ -2665,9 +2667,9 @@ void S3fsCurl::insertV2Headers()
 {
     std::string resource;
     std::string turl;
-    std::string server_path = type == REQTYPE_LISTBUCKET ? "/" : path;
+    std::string server_path = (type == REQTYPE_LISTBUCKET || type == REQTYPE_LISTOBJECTVERSIONS) ? "/" : path;
     MakeUrlResource(server_path.c_str(), resource, turl);
-    if(!query_string.empty() && type != REQTYPE_CHKBUCKET && type != REQTYPE_LISTBUCKET){
+    if(!query_string.empty() && type != REQTYPE_CHKBUCKET && type != REQTYPE_LISTBUCKET && type != REQTYPE_LISTOBJECTVERSIONS){
         resource += "?" + query_string;
     }
 
@@ -3002,6 +3004,7 @@ bool S3fsCurl::PreHeadRequest(const char* tpath, const char* bpath, const char* 
 int S3fsCurl::HeadRequest(const char* tpath, headers_t& meta)
 {
     int result = -1;
+    tpath = remove_versions_prefix(tpath);
 
     S3FS_PRN_INFO3("[tpath=%s]", SAFESTRPTR(tpath));
 
@@ -3425,6 +3428,46 @@ int S3fsCurl::ListBucketRequest(const char* tpath, const char* query)
 
     op = "GET";
     type = REQTYPE_LISTBUCKET;
+
+    // setopt
+    curl_easy_setopt(hCurl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(hCurl, CURLOPT_WRITEDATA, (void*)&bodydata);
+    curl_easy_setopt(hCurl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    if(S3fsCurl::is_verbose){
+        curl_easy_setopt(hCurl, CURLOPT_DEBUGFUNCTION, S3fsCurl::CurlDebugBodyInFunc);     // replace debug function
+    }
+    S3fsCurl::AddUserAgent(hCurl);        // put User-Agent
+
+    return RequestPerform();
+}
+
+int S3fsCurl::ListObjectVersionsRequest(const char* tpath, const char* query)
+{
+    S3FS_PRN_INFO3("[tpath=%s]", SAFESTRPTR(tpath));
+
+    if(!tpath){
+        return -EINVAL;
+    }
+    if(!CreateCurlHandle()){
+        return -EIO;
+    }
+    std::string resource;
+    std::string turl;
+    MakeUrlResource("", resource, turl);    // NOTICE: path is "".
+    if(query){
+        turl += "?";
+        turl += query;
+        query_string = query;
+    }
+
+    url             = prepare_url(turl.c_str());
+    path            = get_realpath(tpath);
+    requestHeaders  = NULL;
+    responseHeaders.clear();
+    bodydata.Clear();
+
+    op = "GET";
+    type = REQTYPE_LISTOBJECTVERSIONS;
 
     // setopt
     curl_easy_setopt(hCurl, CURLOPT_URL, url.c_str());

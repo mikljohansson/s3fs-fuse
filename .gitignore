@@ -78,6 +78,9 @@ src/test_string_util
 test/chaos-http-proxy-*
 test/s3proxy-*
 
+.vscode
+null.d
+
 #
 # Local variables:
 # tab-width: 4

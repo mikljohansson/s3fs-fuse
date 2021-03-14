@@ -41,6 +41,9 @@ std::string cipher_suites;
 std::string instance_name;
 std::string aws_profile           = "default";
 
+std::string S3FS_DIRNAME          = "/.s3fs";
+std::string VERSIONS_DIRNAME      = S3FS_DIRNAME + "/versions";
+
 /*
 * Local variables:
 * tab-width: 4

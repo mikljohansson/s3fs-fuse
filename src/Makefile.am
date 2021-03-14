@@ -25,6 +25,7 @@ if USE_GNUTLS_NETTLE
 endif
 
 s3fs_SOURCES = \
+    s3fs_versioning.cpp \
     s3fs.cpp \
     s3fs_global.cpp \
     s3fs_help.cpp \

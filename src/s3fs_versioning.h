@@ -18,37 +18,18 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#ifndef S3FS_COMMON_H_
-#define S3FS_COMMON_H_
+#ifndef S3FS_S3FS_VERSIONING_H_
+#define S3FS_S3FS_VERSIONING_H_
 
-#include "../config.h"
-#include "types.h"
-#include "s3fs_logger.h"
+#include <string>
 
-//-------------------------------------------------------------------
-// Global variables
-//-------------------------------------------------------------------
-// TODO: namespace these
-extern int64_t        FIVE_GB;
-extern off_t          MIN_MULTIPART_SIZE;
-extern bool           foreground;
-extern bool           nomultipart;
-extern bool           pathrequeststyle;
-extern bool           complement_stat;
-extern bool           noxmlns;
-extern std::string    program_name;
-extern std::string    service_path;
-extern std::string    s3host;
-extern std::string    bucket;
-extern std::string    mount_prefix;
-extern std::string    endpoint;
-extern std::string    cipher_suites;
-extern std::string    instance_name;
-extern std::string    aws_profile;
+extern std::string S3FS_DIRNAME;
+extern std::string VERSIONS_DIRNAME;
 
+bool is_versioning_context(const char *path);
+const char *remove_versions_prefix(const char *path);
 
-
-#endif // S3FS_COMMON_H_
+#endif // S3FS_S3FS_VERSIONING_H_
 
 /*
 * Local variables:

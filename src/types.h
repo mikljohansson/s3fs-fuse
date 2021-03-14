@@ -280,6 +280,17 @@ struct filepart
     }
 };
 
+//
+// Information about an object and its version
+//
+typedef struct object_version {
+    std::string path;
+    std::string version;
+
+    object_version(const char *p, const char *v)
+     : path(p), version(v) {}
+} object_version_t;
+
 //-------------------------------------------------------------------
 // mimes_t
 //-------------------------------------------------------------------
